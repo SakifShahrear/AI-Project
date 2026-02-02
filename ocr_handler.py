@@ -15,6 +15,51 @@ import google.generativeai as genai
 reader = easyocr.Reader(['en'], gpu=False)
 
 
+def parse_ai_response(response_text: str) -> dict:
+	"""
+	Parse JSON from Gemini AI response, handling various formats.
+	Cleans markdown code blocks and extracts JSON.
+	
+	Args:
+		response_text (str): Raw response from Gemini
+	
+	Returns:
+		dict: Parsed JSON or default structure on failure
+	"""
+	try:
+		# Remove backticks and markdown formatting
+		clean_json = response_text.strip()
+		clean_json = re.sub(r'```json\s*', '', clean_json, flags=re.IGNORECASE)
+		clean_json = re.sub(r'```\s*', '', clean_json, flags=re.IGNORECASE)
+		clean_json = clean_json.strip()
+		
+		# Try direct parsing
+		return json.loads(clean_json)
+	except json.JSONDecodeError:
+		# Try extracting JSON from text
+		match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response_text, flags=re.DOTALL)
+		if match:
+			try:
+				return json.loads(match.group(0))
+			except:
+				pass
+		
+		# Return default error structure
+		return {
+			"status": "Suspicious",
+			"accuracy_score": 0,
+			"reasoning": "Error parsing AI response",
+			"match_found": False
+		}
+	except Exception:
+		return {
+			"status": "Suspicious",
+			"accuracy_score": 0,
+			"reasoning": "Error parsing AI response",
+			"match_found": False
+		}
+
+
 def _extract_retry_delay_seconds(message: str, default_seconds: float) -> float:
     try:
         match = re.search(r"retry in ([0-9.]+)s", message, flags=re.IGNORECASE)
@@ -437,99 +482,118 @@ def verify_competition_existence(
     }
 
 
-def ai_verify_validity(extracted_text: str, search_results: List[str], model_name: str = "models/gemini-flash-latest") -> str:
-    """
-    Compare OCR extracted text with search results to verify certificate authenticity.
-    
-    Args:
-        extracted_text (str): Raw text extracted from certificate via OCR
-        search_results (List[str]): List of URLs from web search
-        model_name (str): Gemini model to use
-    
-    Returns:
-        str: JSON string with probability (0.0-1.0), reasons (list), and is_authentic (bool)
-    """
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY environment variable is required")
-    
-    reasons = []
-    probability_factors = []
-    
-    # Factor 1: Number of search results
-    num_results = len(search_results)
-    if num_results == 0:
-        probability_factors.append(0.0)
-        reasons.append("No search results found - likely fake")
-    elif num_results >= 5:
-        probability_factors.append(0.9)
-        reasons.append(f"Strong online presence with {num_results} results")
-    elif num_results >= 3:
-        probability_factors.append(0.7)
-        reasons.append(f"Moderate online presence with {num_results} results")
-    else:
-        probability_factors.append(0.4)
-        reasons.append(f"Weak online presence with only {num_results} result(s)")
-    
-    # Factor 2: Official domain check
-    official_count = sum(1 for url in search_results if _is_official_domain(url))
-    if official_count > 0:
-        probability_factors.append(0.95)
-        reasons.append(f"Found {official_count} official domain(s) (.gov/.edu/.org)")
-    elif search_results:
-        probability_factors.append(0.5)
-        reasons.append("No official domains found")
-    
-    # Factor 3: AI Analysis using Gemini
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(model_name)
-        
-        prompt = (
-            f"You are an expert in certificate authentication. Analyze the following:\n\n"
-            f"Certificate Text (OCR):\n{extracted_text[:1000]}\n\n"
-            f"Search Results URLs ({len(search_results)} found):\n"
-            + "\n".join(f"- {url}" for url in search_results[:10]) + "\n\n"
-            f"Based on this information:\n"
-            f"1. Does the certificate appear authentic based on text quality and content?\n"
-            f"2. Do the search results support the certificate's claims?\n"
-            f"3. Are there red flags (missing info, suspicious patterns)?\n\n"
-            f"Return ONLY a JSON object with:\n"
-            f'{{"analysis": "brief explanation", "confidence": <0.0 to 1.0>}}'
-        )
-        
-        response = _generate_with_retry(model, prompt)
-        ai_result = _parse_gemini_json(response.text)
-        
-        if 'confidence' in ai_result:
-            ai_confidence = float(ai_result.get('confidence', 0.5))
-            probability_factors.append(ai_confidence)
-            reasons.append(f"AI Analysis: {ai_result.get('analysis', 'No details provided')}")
-    
-    except Exception as e:
-        reasons.append(f"AI analysis error: {str(e)}")
-        probability_factors.append(0.3)  # Default low confidence on error
-    
-    # Calculate final probability
-    if probability_factors:
-        final_probability = sum(probability_factors) / len(probability_factors)
-    else:
-        final_probability = 0.1
-    
-    # Cap between 0 and 1
-    final_probability = max(0.0, min(1.0, final_probability))
-    
-    # Determine authenticity (threshold: 0.6)
-    is_authentic = final_probability >= 0.6
-    
-    # Build result JSON
-    result = {
-        "probability": round(final_probability, 3),
-        "reasons": reasons,
-        "is_authentic": is_authentic
-    }
-    
-    return json.dumps(result, indent=2)
+def ai_verify_validity(extracted_text: str, search_results: List[str], scraped_content: List[dict] = None, model_name: str = "models/gemini-flash-latest") -> str:
+	"""
+	Professional Forensic Document Verifier using Gemini AI.
+	Compares OCR data with web search results and scraped content.
+	
+	Args:
+		extracted_text (str): Raw text extracted from certificate via OCR
+		search_results (List[str]): List of URLs from web search
+		scraped_content (List[dict]): List of scraped web content (optional)
+		model_name (str): Gemini model to use
+	
+	Returns:
+		str: JSON string with status, accuracy_score, reasoning, match_found
+	"""
+	api_key = os.getenv("GEMINI_API_KEY")
+	if not api_key:
+		raise ValueError("GEMINI_API_KEY environment variable is required")
+	
+	# Prepare collected web information
+	collected_info = ""
+	
+	if search_results:
+		collected_info += f"Found {len(search_results)} search results:\n"
+		for i, url in enumerate(search_results[:10], 1):
+			collected_info += f"{i}. {url}\n"
+	else:
+		collected_info += "No search results found.\n"
+	
+	if scraped_content:
+		collected_info += f"\n--- SCRAPED WEB CONTENT (from {len(scraped_content)} websites) ---\n"
+		for i, data in enumerate(scraped_content[:3], 1):  # Limit to 3 to avoid token overflow
+			collected_info += f"\nSource {i}: {data['url']}\n"
+			collected_info += f"{data['content'][:1000]}...\n"  # First 1000 chars
+	else:
+		collected_info += "\nNo web content was scraped.\n"
+	
+	# Create the powerful forensic verification prompt
+	verification_prompt = f"""
+You are a Professional Forensic Document Verifier. Your task is to compare the data extracted from a certificate (OCR) against real-world data found on the internet (Web Search).
+
+--- 1. DATA FROM CERTIFICATE (OCR) ---
+{extracted_text[:2000]}
+
+--- 2. DATA FROM WEB SEARCH (SERPER + SCRAPING) ---
+{collected_info}
+
+--- INSTRUCTIONS ---
+1. Cross-reference the "Candidate Name", "Event Name", "Organizer", and "Date" from the OCR with the Web Data.
+2. If the Event exists online and the dates/organizers match, increase the authenticity score.
+3. If you find a list of winners or participants on the web and the candidate's name is there, it's a 100% match.
+4. If no direct match is found, check if the event is a future event (e.g., July 2025). If it is, verify if the event is announced or scheduled.
+5. Look for matching keywords, organization names, dates, and locations between OCR and web content.
+6. Check if the organizer name in the certificate matches the organizer mentioned in web content.
+7. Verify if event dates align between certificate and web announcements.
+8. Provide a reasoning for your verdict.
+
+--- SCORING GUIDELINES ---
+- 90-100: Perfect match found (event exists, dates match, organizer confirmed, participant name found)
+- 70-89: Strong match (event exists, dates/organizer match, but no participant list found)
+- 50-69: Moderate match (event exists but some details don't align perfectly)
+- 30-49: Weak match (event found but significant discrepancies)
+- 0-29: No match or fake (no evidence of event online, or major contradictions)
+
+--- OUTPUT FORMAT (JSON ONLY) ---
+Return ONLY a valid JSON object with these keys:
+- "status": "Verified", "Suspicious", or "Fake"
+- "accuracy_score": (A number between 0-100)
+- "reasoning": "A brief explanation of your decision (2-3 sentences)"
+- "match_found": true/false
+
+DO NOT include markdown formatting, code blocks, or any text outside the JSON object.
+"""
+	
+	try:
+		genai.configure(api_key=api_key)
+		model = genai.GenerativeModel(model_name)
+		
+		# Generate response with retry
+		response = _generate_with_retry(model, verification_prompt)
+		
+		# Parse the response
+		result = parse_ai_response(response.text)
+		
+		# Ensure all required keys exist
+		if "status" not in result:
+			result["status"] = "Suspicious"
+		if "accuracy_score" not in result:
+			result["accuracy_score"] = 0
+		if "reasoning" not in result:
+			result["reasoning"] = "Unable to verify certificate authenticity"
+		if "match_found" not in result:
+			result["match_found"] = False
+		
+		# Legacy compatibility: also include probability and is_authentic
+		result["probability"] = result["accuracy_score"] / 100.0
+		result["is_authentic"] = result["status"] == "Verified"
+		result["reasons"] = [result["reasoning"]]
+		
+		return json.dumps(result, indent=2)
+		
+	except Exception as e:
+		# Fallback response on error
+		fallback_result = {
+			"status": "Suspicious",
+			"accuracy_score": 0,
+			"reasoning": f"AI verification failed: {str(e)}",
+			"match_found": False,
+			"probability": 0.0,
+			"is_authentic": False,
+			"reasons": [f"Error: {str(e)}"]
+		}
+		return json.dumps(fallback_result, indent=2)
 
 
 if __name__ == "__main__":

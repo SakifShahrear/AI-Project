@@ -3,6 +3,7 @@ import os
 from PIL import Image
 import io
 import json
+import pandas as pd
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -14,7 +15,7 @@ from ocr_handler import (
     ai_extract_structured_info,
     ai_verify_validity
 )
-from search_agent import search_competition
+from search_agent import search_competition, scrape_search_results
 from database import (
     save_verification_result,
     get_all_verification_results
@@ -134,12 +135,23 @@ if uploaded_file is not None:
                 st.write(f"**Organizer Name:** `{organizer_name}`")
                 st.write("**Search Strategy:** Will try multiple keyword variations and fallback queries")
             
+            scraped_data = []  # Initialize scraped data
+            
             if competition_name != "Unknown" and organizer_name != "Unknown":
                 with st.spinner(f'Searching Google for "{competition_name} {organizer_name}"...'):
                     search_results = search_competition(competition_name, organizer_name)
                 
                 if len(search_results) > 0:
                     st.success(f"✅ Found {len(search_results)} search results")
+                    
+                    # NEW: Scrape web content from search results
+                    with st.spinner(f'🌐 Scraping content from {min(len(search_results), 5)} websites...'):
+                        scraped_data = scrape_search_results(search_results, max_urls=5)
+                    
+                    if scraped_data:
+                        st.success(f"✅ Successfully scraped {len(scraped_data)} websites")
+                    else:
+                        st.warning("⚠️ Could not scrape content from websites")
                 else:
                     st.warning("⚠️ No search results found.")
                 
@@ -162,6 +174,101 @@ if uploaded_file is not None:
                 st.warning("⚠️ Insufficient information extracted for online search")
                 st.write(f"Competition: `{competition_name}` | Organizer: `{organizer_name}`")
                 search_results = []
+            
+            st.markdown("---")
+            
+            # --- NEW: OCR vs Web Data Comparison ---
+            st.header("🔍 OCR vs Web Data Comparison")
+            st.write("This is what the AI is comparing to verify authenticity:")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("### 📄 Data from Certificate (OCR)")
+                st.info("Information extracted from the uploaded image")
+                
+                ocr_data = {
+                    "Competition Name": competition_name,
+                    "Organizer": organizer_name,
+                    "Event Date": event_date
+                }
+                
+                for key, value in ocr_data.items():
+                    if value and value != "Unknown":
+                        st.markdown(f"**{key}:** `{value}`")
+                    else:
+                        st.markdown(f"**{key}:** ❌ Not found")
+                
+                # Show sample of raw OCR text
+                with st.expander("📝 Raw OCR Text Sample"):
+                    st.text(raw_text[:500] + "..." if len(raw_text) > 500 else raw_text)
+            
+            with col2:
+                st.markdown("### 🌐 Data from Web (Search + Scraping)")
+                st.info("Information found online")
+                
+                if search_results:
+                    st.markdown(f"**Search Results:** ✅ {len(search_results)} URLs found")
+                    
+                    # Show domains
+                    if search_results:
+                        from urllib.parse import urlparse
+                        domains = []
+                        for url in search_results[:5]:
+                            try:
+                                domain = urlparse(url).netloc
+                                domains.append(domain)
+                            except:
+                                pass
+                        
+                        if domains:
+                            st.markdown("**Top Domains:**")
+                            for i, domain in enumerate(domains[:3], 1):
+                                st.markdown(f"{i}. `{domain}`")
+                    
+                    if scraped_data:
+                        st.markdown(f"**Scraped Content:** ✅ {len(scraped_data)} websites")
+                        
+                        # Show content preview
+                        with st.expander("📖 Web Content Preview"):
+                            for i, data in enumerate(scraped_data[:2], 1):
+                                st.markdown(f"**Source {i}:** [{urlparse(data['url']).netloc}]({data['url']})")
+                                content_preview = data['content'][:300]
+                                st.text(content_preview + "..." if len(data['content']) > 300 else content_preview)
+                                st.markdown("---")
+                    else:
+                        st.markdown(f"**Scraped Content:** ❌ No content scraped")
+                else:
+                    st.markdown("**Search Results:** ❌ No results found")
+                    st.markdown("**Scraped Content:** ❌ N/A")
+            
+            # Visual comparison summary
+            st.markdown("### 🎯 Comparison Summary")
+            comparison_col1, comparison_col2, comparison_col3 = st.columns(3)
+            
+            with comparison_col1:
+                has_competition = competition_name != "Unknown"
+                st.metric(
+                    "Competition Match",
+                    "✅ Found" if has_competition and search_results else "❌ Missing",
+                    help="Is the competition name extractable and searchable?"
+                )
+            
+            with comparison_col2:
+                has_organizer = organizer_name != "Unknown"
+                st.metric(
+                    "Organizer Match",
+                    "✅ Found" if has_organizer and search_results else "❌ Missing",
+                    help="Is the organizer name extractable and verifiable?"
+                )
+            
+            with comparison_col3:
+                has_web_evidence = len(search_results) > 0 and len(scraped_data) > 0
+                st.metric(
+                    "Web Evidence",
+                    "✅ Strong" if has_web_evidence else "❌ Weak",
+                    help="Is there substantial online evidence?"
+                )
             
             st.markdown("---")
             
@@ -199,21 +306,34 @@ if uploaded_file is not None:
             st.markdown("---")
             
             # --- Step 5: Get AI verification verdict ---
-            st.info("🧠 Step 5: Running AI verification analysis...")
+            st.info("🧠 Step 5: Running AI Forensic Verification...")
+            st.write("AI is now comparing OCR data with web content to make a verdict...")
             
             try:
-                ai_verdict_json = ai_verify_validity(raw_text, search_results)
+                # Pass scraped_data to the new verification function
+                ai_verdict_json = ai_verify_validity(raw_text, search_results, scraped_data)
                 ai_verdict = json.loads(ai_verdict_json)
                 
-                ai_probability = ai_verdict.get('probability', 0.0)
-                ai_reasons = ai_verdict.get('reasons', [])
-                is_authentic = ai_verdict.get('is_authentic', False)
+                # NEW FORMAT: status, accuracy_score, reasoning, match_found
+                status = ai_verdict.get('status', 'Suspicious')
+                accuracy_score = ai_verdict.get('accuracy_score', 0)
+                reasoning = ai_verdict.get('reasoning', 'Unable to verify')
+                match_found = ai_verdict.get('match_found', False)
+                
+                # Legacy compatibility
+                ai_probability = ai_verdict.get('probability', accuracy_score / 100)
+                ai_reasons = ai_verdict.get('reasons', [reasoning])
+                is_authentic = ai_verdict.get('is_authentic', status == 'Verified')
                 
                 st.success("✅ AI verification complete")
             except Exception as e:
                 st.warning(f"⚠️ AI verification unavailable: {str(e)}")
+                status = 'Suspicious'
+                accuracy_score = score
+                reasoning = "AI analysis failed - using basic score"
+                match_found = len(search_results) > 0
                 ai_probability = score / 100
-                ai_reasons = ["AI analysis failed - using basic score"]
+                ai_reasons = [reasoning]
                 is_authentic = score >= 60
             
             st.markdown("---")
@@ -233,8 +353,8 @@ if uploaded_file is not None:
             with col1:
                 st.metric(
                     "📊 Accuracy Score", 
-                    f"{score}/100",
-                    help="Based on: search results, domain verification, content match"
+                    f"{accuracy_score}/100",
+                    help="AI-calculated score based on OCR vs Web Data comparison"
                 )
             
             with col2:
@@ -245,27 +365,84 @@ if uploaded_file is not None:
                 )
             
             with col3:
-                status_emoji = {"Authentic": "✅", "Suspicious": "⚠️", "Fake": "❌"}
+                status_emoji = {"Verified": "✅", "Suspicious": "⚠️", "Fake": "❌", "Authentic": "✅"}
                 st.metric(
                     "🏷️ Status", 
                     f"{status_emoji.get(status, '❓')} {status}"
                 )
             
-            # AI Reasoning
-            st.markdown("### 🧠 AI Analysis & Reasoning")
+            # Show match status
+            if match_found:
+                st.success("✅ **Match Found:** Event details verified online")
+            else:
+                st.error("❌ **No Match:** Could not verify event details online")
             
-            if is_authentic:
-                st.success("✅ **AI Verdict: AUTHENTIC**")
-                st.write("Certificate text appears legitimate and consistent")
-            elif ai_probability >= 0.5:
+            # AI Reasoning
+            st.markdown("### 🧠 AI Forensic Analysis Report")
+            
+            # Create a nice visual card for the verdict
+            if status == "Verified" or is_authentic:
+                st.success("✅ **AI Verdict: VERIFIED/AUTHENTIC**")
+                st.write("Certificate text appears legitimate and matches online data")
+            elif status == "Suspicious" or ai_probability >= 0.5:
                 st.warning("⚠️ **AI Verdict: SUSPICIOUS** (Cannot fully verify without online evidence)")
                 st.write("Text quality is acceptable, but online verification is limited")
             else:
-                st.error("❌ **AI Verdict: NOT AUTHENTIC**")
+                st.error("❌ **AI Verdict: FAKE/NOT AUTHENTIC**")
+            
+            # Detailed comparison table
+            st.markdown("#### 📋 Detailed Comparison")
+            
+            comparison_data = []
+            
+            # Competition Name comparison
+            if competition_name != "Unknown":
+                web_found = "Yes" if len(search_results) > 0 else "No"
+                comparison_data.append({
+                    "Field": "Competition Name",
+                    "From Certificate": competition_name,
+                    "Found on Web": web_found,
+                    "Status": "✅" if web_found == "Yes" else "❌"
+                })
+            
+            # Organizer comparison
+            if organizer_name != "Unknown":
+                web_found = "Yes" if len(search_results) > 0 else "No"
+                comparison_data.append({
+                    "Field": "Organizer",
+                    "From Certificate": organizer_name,
+                    "Found on Web": web_found,
+                    "Status": "✅" if web_found == "Yes" else "❌"
+                })
+            
+            # Event Date comparison
+            if event_date != "Unknown":
+                web_found = "Yes" if len(search_results) > 0 else "No"
+                comparison_data.append({
+                    "Field": "Event Date",
+                    "From Certificate": event_date,
+                    "Found on Web": web_found,
+                    "Status": "✅" if web_found == "Yes" else "❌"
+                })
+            
+            # Web Evidence
+            comparison_data.append({
+                "Field": "Web Evidence",
+                "From Certificate": "N/A",
+                "Found on Web": f"{len(search_results)} URLs, {len(scraped_data)} scraped",
+                "Status": "✅" if len(search_results) > 0 else "❌"
+            })
+            
+            if comparison_data:
+                df = pd.DataFrame(comparison_data)
+                st.dataframe(df, use_container_width=True, hide_index=True)
             
             st.markdown("**Analysis Details:**")
-            for i, reason in enumerate(ai_reasons, 1):
-                st.write(f"{i}. {reason}")
+            st.write(f"📝 {reasoning}")
+            
+            if ai_reasons:
+                for i, reason in enumerate(ai_reasons, 1):
+                    st.write(f"{i}. {reason}")
             
             st.markdown("---")
             
@@ -287,8 +464,8 @@ if uploaded_file is not None:
                             file_url=file_url,
                             competition_name=competition_name,
                             organizer=organizer_name,
-                            accuracy_score=score,
-                            status=status
+                            accuracy_score=accuracy_score,  # Use new accuracy_score
+                            status=status  # Use new status format
                         )
                         
                         st.success("✅ Verification result saved successfully!")

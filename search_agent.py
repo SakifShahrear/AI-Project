@@ -6,6 +6,12 @@ import os
 import re
 from dotenv import load_dotenv
 
+try:
+	from trafilatura import fetch_url, extract
+	TRAFILATURA_AVAILABLE = True
+except:
+	TRAFILATURA_AVAILABLE = False
+
 # Load environment variables
 load_dotenv()
 
@@ -590,4 +596,93 @@ def _prioritize_urls(urls: list[str], max_results: int = 15) -> list[str]:
 	prioritized = website_urls + official_urls + facebook_urls + linkedin_urls + other_urls
 	
 	return list(dict.fromkeys(prioritized))[:max_results]
+
+
+def scrape_url_content(url: str, max_length: int = 5000) -> dict:
+	"""
+	Scrape the content from a URL using Trafilatura (or BeautifulSoup as fallback).
+	
+	Args:
+		url (str): The URL to scrape
+		max_length (int): Maximum content length to return
+	
+	Returns:
+		dict: {
+			'url': str,
+			'content': str (main text content),
+			'success': bool
+		}
+	"""
+	result = {
+		'url': url,
+		'content': '',
+		'success': False
+	}
+	
+	try:
+		# Try Trafilatura first (best for extracting main content)
+		if TRAFILATURA_AVAILABLE:
+			downloaded = fetch_url(url)
+			if downloaded:
+				content = extract(downloaded, include_comments=False, include_tables=False)
+				if content:
+					result['content'] = content[:max_length]
+					result['success'] = True
+					return result
+		
+		# Fallback to BeautifulSoup
+		headers = {
+			'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+		}
+		response = requests.get(url, headers=headers, timeout=10)
+		
+		if response.status_code == 200:
+			soup = BeautifulSoup(response.text, 'html.parser')
+			
+			# Remove script and style tags
+			for tag in soup(['script', 'style', 'nav', 'footer', 'header']):
+				tag.decompose()
+			
+			# Get text content
+			text = soup.get_text(separator=' ', strip=True)
+			text = re.sub(r'\s+', ' ', text)  # Clean multiple whitespaces
+			
+			if len(text) > 100:  # Valid content
+				result['content'] = text[:max_length]
+				result['success'] = True
+		
+	except Exception as e:
+		print(f"   ⚠️ Failed to scrape {url}: {e}")
+	
+	return result
+
+
+def scrape_search_results(urls: list[str], max_urls: int = 5) -> list[dict]:
+	"""
+	Scrape content from multiple URLs.
+	
+	Args:
+		urls (list[str]): List of URLs to scrape
+		max_urls (int): Maximum number of URLs to scrape
+	
+	Returns:
+		list[dict]: List of scraped content dictionaries
+	"""
+	scraped_data = []
+	
+	for i, url in enumerate(urls[:max_urls]):
+		print(f"   🌐 Scraping URL {i+1}/{min(len(urls), max_urls)}: {url[:60]}...")
+		result = scrape_url_content(url)
+		
+		if result['success']:
+			scraped_data.append(result)
+			print(f"      ✅ Scraped {len(result['content'])} characters")
+		else:
+			print(f"      ❌ Failed to scrape")
+		
+		# Be polite - add small delay
+		if i < min(len(urls), max_urls) - 1:
+			time.sleep(0.5)
+	
+	return scraped_data
 
