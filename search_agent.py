@@ -600,7 +600,8 @@ def _prioritize_urls(urls: list[str], max_results: int = 15) -> list[str]:
 
 def scrape_url_content(url: str, max_length: int = 5000) -> dict:
 	"""
-	Scrape the content from a URL using Trafilatura (or BeautifulSoup as fallback).
+	Scrape the content from a URL using multiple strategies.
+	Tries: Trafilatura → BeautifulSoup with paragraphs → Simple text extraction
 	
 	Args:
 		url (str): The URL to scrape
@@ -620,46 +621,108 @@ def scrape_url_content(url: str, max_length: int = 5000) -> dict:
 	}
 	
 	try:
+		# Better headers to avoid blocking
+		headers = {
+			'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+			'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+			'Accept-Language': 'en-US,en;q=0.5',
+			'Accept-Encoding': 'gzip, deflate',
+			'Connection': 'keep-alive',
+			'Upgrade-Insecure-Requests': '1'
+		}
+		
 		# Try Trafilatura first (best for extracting main content)
 		if TRAFILATURA_AVAILABLE:
-			downloaded = fetch_url(url)
-			if downloaded:
-				content = extract(downloaded, include_comments=False, include_tables=False)
-				if content:
-					result['content'] = content[:max_length]
+			try:
+				downloaded = fetch_url(url, timeout=10)
+				if downloaded:
+					content = extract(downloaded, include_comments=False, include_tables=False)
+					if content and len(content) > 50:
+						result['content'] = content[:max_length]
+						result['success'] = True
+						return result
+			except Exception as e:
+				print(f"   ℹ️ Trafilatura failed: {str(e)[:50]}")
+		
+		# Strategy 1: Try with requests + BeautifulSoup (extract paragraphs)
+		try:
+			response = requests.get(url, headers=headers, timeout=10)
+			response.encoding = 'utf-8'
+			
+			if response.status_code == 200:
+				soup = BeautifulSoup(response.text, 'html.parser')
+				
+				# Try to get main content from common containers
+				main_content = None
+				for selector in ['main', 'article', '[role="main"]', '.content', '.post', '.entry']:
+					element = soup.select_one(selector)
+					if element:
+						main_content = element
+						break
+				
+				if not main_content:
+					main_content = soup.body if soup.body else soup
+				
+				# Remove unwanted elements
+				for tag in main_content(['script', 'style', 'nav', 'footer', 'aside', 'noscript', 'meta']):
+					tag.decompose()
+				
+				# Try to get paragraphs first (better quality)
+				paragraphs = main_content.find_all(['p', 'article', 'div', 'section'])
+				if paragraphs:
+					content_text = ' '.join([p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)])
+					content_text = re.sub(r'\s+', ' ', content_text).strip()
+					
+					if len(content_text) > 50:
+						result['content'] = content_text[:max_length]
+						result['success'] = True
+						return result
+				
+				# Fallback: get all text
+				text = main_content.get_text(separator=' ', strip=True)
+				text = re.sub(r'\s+', ' ', text)
+				
+				if len(text) > 50:
+					result['content'] = text[:max_length]
 					result['success'] = True
 					return result
 		
-		# Fallback to BeautifulSoup
-		headers = {
-			'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-		}
-		response = requests.get(url, headers=headers, timeout=10)
+		except Exception as e:
+			print(f"   ℹ️ BeautifulSoup strategy failed: {str(e)[:50]}")
 		
-		if response.status_code == 200:
-			soup = BeautifulSoup(response.text, 'html.parser')
+		# Strategy 2: Simple GET request with basic parsing
+		try:
+			response = requests.get(url, headers=headers, timeout=8)
+			response.encoding = 'utf-8'
 			
-			# Remove script and style tags
-			for tag in soup(['script', 'style', 'nav', 'footer', 'header']):
-				tag.decompose()
-			
-			# Get text content
-			text = soup.get_text(separator=' ', strip=True)
-			text = re.sub(r'\s+', ' ', text)  # Clean multiple whitespaces
-			
-			if len(text) > 100:  # Valid content
-				result['content'] = text[:max_length]
-				result['success'] = True
+			if response.status_code == 200:
+				# Remove common junk patterns
+				html = response.text
+				html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+				html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
+				
+				soup = BeautifulSoup(html, 'html.parser')
+				text = soup.get_text(separator=' ', strip=True)
+				text = re.sub(r'\s+', ' ', text)
+				
+				# Get meaningful portion (skip very long texts that are likely lists)
+				if 50 < len(text) < 50000:
+					result['content'] = text[:max_length]
+					result['success'] = True
+					return result
+		
+		except Exception as e:
+			print(f"   ℹ️ Simple strategy failed: {str(e)[:50]}")
 		
 	except Exception as e:
-		print(f"   ⚠️ Failed to scrape {url}: {e}")
+		print(f"   ⚠️ Scraping {url[:40]}... failed: {str(e)[:50]}")
 	
 	return result
 
 
 def scrape_search_results(urls: list[str], max_urls: int = 5) -> list[dict]:
 	"""
-	Scrape content from multiple URLs.
+	Scrape content from multiple URLs with improved retry logic.
 	
 	Args:
 		urls (list[str]): List of URLs to scrape
@@ -669,20 +732,37 @@ def scrape_search_results(urls: list[str], max_urls: int = 5) -> list[dict]:
 		list[dict]: List of scraped content dictionaries
 	"""
 	scraped_data = []
+	attempted = 0
+	successful = 0
 	
-	for i, url in enumerate(urls[:max_urls]):
-		print(f"   🌐 Scraping URL {i+1}/{min(len(urls), max_urls)}: {url[:60]}...")
+	# Adjust max_urls to ensure we try enough
+	target_urls = min(len(urls), max_urls)
+	
+	for i, url in enumerate(urls):
+		if successful >= max_urls:
+			break
+		
+		if attempted >= target_urls * 2:  # Don't try too many times
+			break
+		
+		attempted += 1
+		
+		print(f"   🌐 Scraping ({attempted}) {url[:50]}...")
 		result = scrape_url_content(url)
 		
 		if result['success']:
 			scraped_data.append(result)
-			print(f"      ✅ Scraped {len(result['content'])} characters")
+			successful += 1
+			char_count = len(result['content'])
+			print(f"      ✅ Success ({successful}/{max_urls}): {char_count} chars")
 		else:
-			print(f"      ❌ Failed to scrape")
+			print(f"      ❌ Failed - trying next URL...")
 		
-		# Be polite - add small delay
-		if i < min(len(urls), max_urls) - 1:
-			time.sleep(0.5)
+		# Be polite - add delay between requests
+		if i < len(urls) - 1:
+			time.sleep(0.3)
+	
+	print(f"   📊 Scraping complete: {successful} successful out of {attempted} attempts")
 	
 	return scraped_data
 

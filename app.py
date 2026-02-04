@@ -4,6 +4,7 @@ from PIL import Image
 import io
 import json
 import pandas as pd
+import re
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -21,6 +22,10 @@ from database import (
     get_all_verification_results
 )
 from utils import calculate_accuracy
+from certificate_investigator import (
+    investigate_certificate,
+    run_investigation_summary
+)
 
 # --- Streamlit UI Configuration ---
 st.set_page_config(
@@ -337,6 +342,61 @@ if uploaded_file is not None:
                 is_authentic = score >= 60
             
             st.markdown("---")
+            
+            # --- Step 6: Expert Investigator Analysis ---
+            st.info("🔍 Step 6: Running Expert Investigator Verification...")
+            st.write("AI investigator is analyzing the certificate with forensic detail...")
+            
+            # Extract candidate name from OCR text (if possible)
+            candidate_name = "Not extracted"
+            # Try to find a name pattern in the text
+            name_patterns = re.findall(r'\b[A-Z][a-z]+\s+[A-Z][a-z]+\b', raw_text)
+            if name_patterns:
+                candidate_name = name_patterns[0]
+            
+            # Extract location if available
+            location = "Bangladesh"
+            if 'dhaka' in raw_text.lower():
+                location = "Dhaka, Bangladesh"
+            
+            try:
+                # Run the investigator
+                investigation_result = investigate_certificate(
+                    candidate_name=candidate_name,
+                    competition_name=competition_name,
+                    organizer=organizer_name,
+                    extracted_text=raw_text,
+                    web_info=scraped_data,
+                    event_date=event_date,
+                    location=location
+                )
+                
+                st.success("✅ Expert investigation complete")
+                
+                # Store investigation result for display
+                investigator_status = investigation_result.get('status', 'Suspicious')
+                investigator_score = investigation_result.get('accuracy_score', 0)
+                investigator_reasoning = investigation_result.get('reasoning', 'Unable to investigate')
+                investigator_evidence = investigation_result.get('evidence_found', 'None')
+                
+            except Exception as e:
+                st.warning(f"⚠️ Expert investigation unavailable: {str(e)}")
+                investigator_status = 'Suspicious'
+                investigator_score = 0
+                investigator_reasoning = "Investigation failed - see basic analysis above"
+                investigator_evidence = "None"
+                investigation_result = {
+                    "status": "Suspicious",
+                    "accuracy_score": 0,
+                    "reasoning": investigator_reasoning,
+                    "evidence_found": investigator_evidence,
+                    "candidate_verified": False,
+                    "organizer_verified": False,
+                    "event_found_online": False,
+                    "keywords_found": []
+                }
+            
+            st.markdown("---")
             # --- Display Results Dashboard ---
             st.header("🎯 Verification Results")
             
@@ -443,6 +503,144 @@ if uploaded_file is not None:
             if ai_reasons:
                 for i, reason in enumerate(ai_reasons, 1):
                     st.write(f"{i}. {reason}")
+            
+            st.markdown("---")
+            
+            # --- NEW: Expert Investigator Analysis Report ---
+            st.header("🔍 Expert Investigator Report")
+            st.markdown("*Advanced forensic analysis comparing OCR data with web evidence*")
+            
+            # Investigator Metrics
+            inv_col1, inv_col2, inv_col3 = st.columns(3)
+            
+            with inv_col1:
+                st.metric(
+                    "🎯 Investigation Score",
+                    f"{investigator_score}/100",
+                    help="Expert investigator's verification score"
+                )
+            
+            with inv_col2:
+                inv_status_emoji = {"Verified": "✅", "Suspicious": "⚠️", "Fake": "❌"}
+                st.metric(
+                    "📋 Investigation Status",
+                    f"{inv_status_emoji.get(investigator_status, '❓')} {investigator_status}"
+                )
+            
+            with inv_col3:
+                event_verified = investigation_result.get('event_found_online', False)
+                st.metric(
+                    "🌐 Event Found Online",
+                    "✅ Yes" if event_verified else "❌ No",
+                    help="Was the event found in web search results?"
+                )
+            
+            # Investigator Verdict Card
+            st.markdown("### 🧐 Investigator Verdict")
+            
+            if investigator_status == "Verified":
+                st.success("""
+✅ **CERTIFICATE VERIFIED**
+
+The expert investigator found strong evidence:
+- Event details match online sources
+- Organizer is legitimate and verified
+- All key information corroborated
+                """)
+            elif investigator_status == "Suspicious":
+                st.warning("""
+⚠️ **CERTIFICATE SUSPICIOUS**
+
+The investigator found limited evidence:
+- Some details could not be verified online
+- Event may be too new or local
+- Recommend manual verification
+                """)
+            else:  # Fake
+                st.error("""
+❌ **CERTIFICATE LIKELY FAKE**
+
+The investigator found serious issues:
+- Event not found in any online sources
+- Organizer cannot be verified
+- Information inconsistent with web data
+                """)
+            
+            # Investigation Details
+            st.markdown("### 📊 Investigation Details")
+            
+            inv_details_col1, inv_details_col2 = st.columns(2)
+            
+            with inv_details_col1:
+                st.markdown("**Verification Flags:**")
+                candidate_check = investigation_result.get('candidate_verified', False)
+                organizer_check = investigation_result.get('organizer_verified', False)
+                event_check = investigation_result.get('event_found_online', False)
+                
+                st.markdown(f"- Candidate Name Verified: {'✅ Yes' if candidate_check else '❌ No'}")
+                st.markdown(f"- Organizer Verified: {'✅ Yes' if organizer_check else '❌ No'}")
+                st.markdown(f"- Event Found Online: {'✅ Yes' if event_check else '❌ No'}")
+            
+            with inv_details_col2:
+                st.markdown("**Keywords Matched:**")
+                keywords = investigation_result.get('keywords_found', [])
+                if keywords:
+                    for kw in keywords[:5]:  # Show first 5 keywords
+                        st.markdown(f"- {kw}")
+                else:
+                    st.markdown("- No specific keywords matched")
+            
+            # Investigation Reasoning
+            st.markdown("### 📋 Investigator's Reasoning")
+            st.info(investigator_reasoning)
+            
+            # Evidence Found
+            st.markdown("### 🔗 Evidence Found")
+            if investigator_evidence and investigator_evidence != "None":
+                st.success(f"**Primary Evidence:** {investigator_evidence}")
+            else:
+                st.warning("No specific evidence URL could be identified")
+            
+            st.markdown("---")
+            
+            # --- Comparison: AI vs Investigator ---
+            st.header("📈 Analysis Comparison: AI vs Investigator")
+            
+            comparison_cols = st.columns(2)
+            
+            with comparison_cols[0]:
+                st.markdown("### 🤖 AI Analysis")
+                st.markdown(f"- **Score:** {accuracy_score}/100")
+                st.markdown(f"- **Status:** {status}")
+                st.markdown(f"- **Type:** General forensic analysis")
+            
+            with comparison_cols[1]:
+                st.markdown("### 🔍 Expert Investigator")
+                st.markdown(f"- **Score:** {investigator_score}/100")
+                st.markdown(f"- **Status:** {investigator_status}")
+                st.markdown(f"- **Type:** Bangladesh-specific deep investigation")
+            
+            # Final Recommendation
+            st.markdown("---")
+            st.header("✅ Final Recommendation")
+            
+            # Determine final status based on both analyses
+            if investigator_status == "Verified" or investigator_score >= 70:
+                final_status = "Recommended for Acceptance ✅"
+                final_color = "success"
+            elif investigator_status == "Fake" or investigator_score <= 40:
+                final_status = "Recommend Rejection ❌"
+                final_color = "error"
+            else:
+                final_status = "Requires Manual Verification ⚠️"
+                final_color = "warning"
+            
+            if final_color == "success":
+                st.success(f"### {final_status}")
+            elif final_color == "error":
+                st.error(f"### {final_status}")
+            else:
+                st.warning(f"### {final_status}")
             
             st.markdown("---")
             
