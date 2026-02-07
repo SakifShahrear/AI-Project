@@ -179,69 +179,344 @@ def _is_future_or_recent_event(text: str) -> bool:
     return False
 
 
-def calculate_accuracy(raw_text: str, search_urls: List[str]) -> Tuple[float, str]:
-    """
-    Calculate accuracy score and status based ONLY on search URLs found.
-    
-    Args:
-        raw_text (str): Raw OCR extracted text from certificate
-        search_urls (List[str]): List of URLs from web search
-    
-    Returns:
-        Tuple[float, str]: (score 0-100, status "Authentic"/"Suspicious"/"Fake")
-    
-    Scoring (based ONLY on search results):
-        - Official domains (.gov, .edu, .org): +40 points
-        - Social media links (Facebook, LinkedIn): +30 points
-        - Text consistency with search results: +20 points
-        - No search results: 0 points (cannot verify)
-    
-    Status:
-        - Authentic: score >= 70
-        - Suspicious: score 40-69
-        - Fake: score < 40 (including no search results)
-    """
-    score = 0
-    reasons = []
-    
-    # Only proceed if we have search results
-    if len(search_urls) == 0:
-        reasons.append("❌ No online verification found - cannot confirm authenticity")
-        reasons.append("⚠️ Certificate may be fake or too local/new to be indexed")
-        return 0, "Fake"
-    
-    # 1. Check for official domains (+40 points)
-    has_official = any(_is_official_domain(url) for url in search_urls)
-    if has_official:
-        score += 40
-        reasons.append("✓ Found official domain (.gov/.edu/.org)")
-    
-    # 2. Check for social media links (+30 points)
-    has_social = any(_is_social_media_link(url) for url in search_urls)
-    if has_social:
-        score += 30
-        reasons.append("✓ Found official social media event")
-    
-    # 3. Check text consistency (+20 points)
-    is_consistent = _check_text_consistency(raw_text, search_urls)
-    if is_consistent:
-        score += 20
-        reasons.append("✓ Certificate details match search results")
-    
-    # Cap at 100
-    score = min(score, 100)
-    
-    # Determine status based ONLY on search verification
-    if score >= 70:
+def _normalize_tokens(text: str) -> List[str]:
+    if not text:
+        return []
+    text = re.sub(r"[^a-zA-Z0-9\s]", " ", text.lower())
+    tokens = [t for t in text.split() if len(t) > 3]
+    return tokens
+
+
+def _domain_matches_identity(search_urls: List[str], organizer_name: str | None,
+                             competition_name: str | None, event_date: str | None) -> bool:
+    if not search_urls:
+        return False
+
+    tokens = set(_normalize_tokens(organizer_name) + _normalize_tokens(competition_name))
+    year = _extract_year(event_date or "")
+    if year:
+        tokens.add(str(year))
+
+    if not tokens:
+        return False
+
+    for url in search_urls:
+        url_lower = url.lower()
+        for token in tokens:
+            if token in url_lower:
+                return True
+    return False
+
+
+def _content_has_competition_and_date(scraped_data: List[Dict], competition_name: str | None,
+                                      event_date: str | None) -> bool:
+    if not scraped_data or not competition_name or not event_date:
+        return False
+
+    comp = competition_name.lower().strip()
+    year = _extract_year(event_date)
+    if not comp or not year:
+        return False
+
+    for item in scraped_data:
+        content = (item.get("content") or "").lower()
+        if comp in content and str(year) in content:
+            return True
+    return False
+
+
+def rank_search_urls(
+    search_urls: List[str],
+    competition_name: str | None,
+    organizer_name: str | None,
+    event_date: str | None
+) -> List[str]:
+    if not search_urls:
+        return []
+
+    tokens = set(_normalize_tokens(competition_name) + _normalize_tokens(organizer_name))
+    year = _extract_year(event_date or "")
+
+    def relevance_score(url: str) -> int:
+        score = 0
+        if _is_official_domain(url):
+            score += 3
+        if _is_social_media_link(url):
+            score += 2
+
+        url_lower = url.lower()
+        if year and str(year) in url_lower:
+            score += 2
+
+        for token in tokens:
+            if token in url_lower:
+                score += 1
+        return score
+
+    return sorted(search_urls, key=relevance_score, reverse=True)
+
+
+def calculate_rule_based_score(
+    raw_text: str,
+    competition_name: str | None,
+    organizer_name: str | None,
+    event_date: str | None,
+    search_urls: List[str],
+    scraped_data: List[Dict] | None
+) -> Tuple[int, str]:
+    score = 10
+
+    if raw_text and raw_text.strip():
+        score = max(score, 20)
+
+    has_fields = any([
+        competition_name not in (None, "Unknown"),
+        organizer_name not in (None, "Unknown"),
+        event_date not in (None, "Unknown")
+    ])
+    if has_fields:
+        score = max(score, 40)
+
+    if search_urls and len(search_urls) > 0:
+        score = max(score, 60)
+
+    if _domain_matches_identity(search_urls, organizer_name, competition_name, event_date):
+        score = max(score, 80)
+
+    if _content_has_competition_and_date(scraped_data or [], competition_name, event_date):
+        score = max(score, 95)
+
+    if score >= 80:
         status = "Authentic"
-        reasons.insert(0, "✅ Certificate verified through multiple sources")
     elif score >= 40:
         status = "Suspicious"
-        reasons.insert(0, "⚠️ Certificate found online but with limited verification")
     else:
         status = "Fake"
-        reasons.insert(0, "❌ Certificate not properly verified online")
-    
+
+    return score, status
+
+
+def _tokenize_text(text: str) -> set:
+    if not text:
+        return set()
+    text = re.sub(r"[^a-zA-Z0-9\s]", " ", text.lower())
+    return {t for t in text.split() if len(t) > 3}
+
+
+def text_similarity_score(raw_text: str, scraped_data: List[Dict] | None) -> int:
+    if not raw_text or not scraped_data:
+        return 0
+
+    corpus = " ".join((item.get("content") or "") for item in scraped_data[:5])
+    ocr_tokens = _tokenize_text(raw_text)
+    web_tokens = _tokenize_text(corpus)
+
+    if not ocr_tokens or not web_tokens:
+        return 0
+
+    intersection = len(ocr_tokens.intersection(web_tokens))
+    union = len(ocr_tokens.union(web_tokens))
+    if union == 0:
+        return 0
+
+    jaccard = intersection / union
+    return min(100, int(jaccard * 200))
+
+
+def field_confidence_score(
+    competition_name: str | None,
+    organizer_name: str | None,
+    event_date: str | None,
+    search_urls: List[str],
+    scraped_data: List[Dict] | None
+) -> int:
+    score = 0
+    if competition_name and competition_name != "Unknown":
+        score += 35
+    if organizer_name and organizer_name != "Unknown":
+        score += 35
+    if event_date and event_date != "Unknown":
+        score += 20
+
+    corpus = " ".join((item.get("content") or "") for item in (scraped_data or [])[:5]).lower()
+    urls_text = " ".join(search_urls or []).lower()
+
+    if competition_name and competition_name.lower() in corpus:
+        score += 5
+    if organizer_name and organizer_name.lower() in corpus:
+        score += 5
+    if event_date and event_date.lower() in corpus:
+        score += 5
+    if competition_name and competition_name.lower() in urls_text:
+        score += 5
+    if organizer_name and organizer_name.lower() in urls_text:
+        score += 5
+
+    return min(score, 100)
+
+
+def anomaly_score(raw_text: str) -> int:
+    if not raw_text:
+        return 0
+
+    text = raw_text.strip()
+    score = 100
+
+    if len(text) < 50:
+        score -= 50
+    elif len(text) < 100:
+        score -= 30
+
+    lower = text.lower()
+    suspicious = ["scam", "fake", "invalid", "forged", "counterfeit"]
+    if any(word in lower for word in suspicious):
+        score -= 40
+
+    digits = sum(1 for c in text if c.isdigit())
+    letters = sum(1 for c in text if c.isalpha())
+    total = len(text)
+
+    if total > 0 and digits / total > 0.25:
+        score -= 20
+    if total > 0 and letters / total < 0.3:
+        score -= 20
+
+    return max(0, min(100, score))
+
+
+def calculate_combined_score(
+    raw_text: str,
+    competition_name: str | None,
+    organizer_name: str | None,
+    event_date: str | None,
+    search_urls: List[str],
+    scraped_data: List[Dict] | None
+) -> Tuple[int, str, Dict[str, int]]:
+    similarity = text_similarity_score(raw_text, scraped_data)
+    field_score = field_confidence_score(
+        competition_name,
+        organizer_name,
+        event_date,
+        search_urls,
+        scraped_data
+    )
+    anomaly = anomaly_score(raw_text)
+
+    combined = int((0.4 * similarity) + (0.4 * field_score) + (0.2 * anomaly))
+
+    if combined >= 80:
+        status = "Authentic"
+    elif combined >= 40:
+        status = "Suspicious"
+    else:
+        status = "Fake"
+
+    details = {
+        "similarity": similarity,
+        "field_confidence": field_score,
+        "anomaly": anomaly
+    }
+
+    return combined, status, details
+
+
+def check_step4_evidence(
+    raw_text: str,
+    search_urls: List[str],
+    competition_name: str | None,
+    organizer_name: str | None,
+    event_date: str | None,
+    scraped_data: List[Dict] | None
+) -> bool:
+    if _domain_matches_identity(search_urls, organizer_name, competition_name, event_date):
+        return True
+    if _content_has_competition_and_date(scraped_data or [], competition_name, event_date):
+        return True
+    return _check_text_consistency(raw_text, search_urls)
+
+
+def calculate_step_score(
+    step1_found: bool,
+    step2_found: bool,
+    step3_found: bool,
+    step4_found: bool,
+    step5_found: bool
+) -> Tuple[int, str]:
+    score = 10
+    any_step = any([step1_found, step2_found, step3_found, step4_found, step5_found])
+
+    if not any_step:
+        score = 70
+    elif step5_found:
+        score = 90
+    elif step4_found:
+        score = 70
+    elif step3_found:
+        score = 60
+    elif step2_found:
+        score = 40
+    elif step1_found:
+        score = 20
+
+    if score >= 80:
+        status = "Authentic"
+    elif score >= 40:
+        status = "Suspicious"
+    else:
+        status = "Fake"
+
+    return score, status
+
+
+def calculate_accuracy(
+    raw_text: str,
+    search_urls: List[str],
+    competition_name: str | None = None,
+    organizer_name: str | None = None,
+    event_date: str | None = None,
+    scraped_data: List[Dict] | None = None
+) -> Tuple[float, str]:
+    """
+    Calculate accuracy score and status with fixed rules.
+
+    Rules:
+        - Text extracted -> score 20
+        - Possible to search -> score 40
+        - Search results found -> score 60
+        - Domain matches organizer/competition/date -> score 80
+        - Competition name + date found on website -> score 95
+        - Otherwise -> score 10
+    """
+    score = 10
+
+    if raw_text and len(raw_text.strip()) > 0:
+        score = max(score, 20)
+
+    can_search = (
+        competition_name
+        and organizer_name
+        and competition_name != "Unknown"
+        and organizer_name != "Unknown"
+    )
+    if can_search:
+        score = max(score, 40)
+
+    if search_urls and len(search_urls) > 0:
+        score = max(score, 60)
+
+    if _domain_matches_identity(search_urls, organizer_name, competition_name, event_date):
+        score = max(score, 80)
+
+    if _content_has_competition_and_date(scraped_data or [], competition_name, event_date):
+        score = max(score, 95)
+
+    if score >= 80:
+        status = "Authentic"
+    elif score >= 40:
+        status = "Suspicious"
+    else:
+        status = "Fake"
+
     return score, status
 
 

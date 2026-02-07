@@ -21,7 +21,7 @@ from database import (
     save_verification_result,
     get_all_verification_results
 )
-from utils import calculate_accuracy
+from utils import calculate_combined_score, rank_search_urls
 from certificate_investigator import (
     investigate_certificate,
     run_investigation_summary
@@ -148,6 +148,13 @@ if uploaded_file is not None:
                 
                 if len(search_results) > 0:
                     st.success(f"✅ Found {len(search_results)} search results")
+
+                    search_results = rank_search_urls(
+                        search_results,
+                        competition_name,
+                        organizer_name,
+                        event_date
+                    )
                     
                     # NEW: Scrape web content from search results
                     with st.spinner(f'🌐 Scraping content from {min(len(search_results), 5)} websites...'):
@@ -280,14 +287,14 @@ if uploaded_file is not None:
             # --- Step 4: Calculate basic accuracy score ---
             st.info("📊 Step 4: Calculating accuracy score...")
             
-            # Note: calculate_accuracy now returns (score, status) tuple
-            result = calculate_accuracy(raw_text, search_results)
-            if isinstance(result, tuple):
-                score, status = result
-            else:
-                # Fallback for old format
-                score = result.get('score', 0)
-                status = result.get('status', 'Fake')
+            score, rule_status, score_details = calculate_combined_score(
+                raw_text,
+                competition_name,
+                organizer_name,
+                event_date,
+                search_results,
+                scraped_data
+            )
             
             # Display scoring breakdown
             with st.expander("📈 Scoring Breakdown"):
@@ -295,16 +302,14 @@ if uploaded_file is not None:
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    st.write("**With Search Results:**")
-                    st.write("• Official domains (.gov/.edu/.org): +40 pts")
-                    st.write("• Social media events: +30 pts")
-                    st.write("• Text consistency: +20 pts")
+                    st.write("**Algorithm Scores:**")
+                    st.write(f"• Text similarity: {score_details['similarity']}/100")
+                    st.write(f"• Field confidence: {score_details['field_confidence']}/100")
+                    st.write(f"• Anomaly score: {score_details['anomaly']}/100")
                 
                 with col2:
-                    st.write("**Without Search Results:**")
-                    st.write("• OCR text clarity: +10 pts")
-                    st.write("• Recent/future event: +10 pts")
-                    st.write("• High confidence text: +5 pts")
+                    st.write("**Weights:**")
+                    st.write("• Similarity 40% + Field 40% + Anomaly 20%")
                 
                 st.write(f"**Current Score:** `{score}/100` - Found {len(search_results)} online results")
             
@@ -321,14 +326,15 @@ if uploaded_file is not None:
                 
                 # NEW FORMAT: status, accuracy_score, reasoning, match_found
                 status = ai_verdict.get('status', 'Suspicious')
-                accuracy_score = ai_verdict.get('accuracy_score', 0)
+                ai_accuracy_score = ai_verdict.get('accuracy_score', 0)
                 reasoning = ai_verdict.get('reasoning', 'Unable to verify')
                 match_found = ai_verdict.get('match_found', False)
                 
                 # Legacy compatibility
-                ai_probability = ai_verdict.get('probability', accuracy_score / 100)
+                ai_probability = ai_verdict.get('probability', ai_accuracy_score / 100)
                 ai_reasons = ai_verdict.get('reasons', [reasoning])
                 is_authentic = ai_verdict.get('is_authentic', status == 'Verified')
+                accuracy_score = score
                 
                 st.success("✅ AI verification complete")
             except Exception as e:
