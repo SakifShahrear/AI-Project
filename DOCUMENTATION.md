@@ -1,0 +1,128 @@
+# Simple Guide (For Everyone) / সহজ গাইড (সবার জন্য)
+
+This project helps check certificates. Think of it like a helper that looks at a certificate, reads the words, and then tries to see if it is real.
+এই প্রোজেক্টটি সার্টিফিকেট যাচাই করতে সাহায্য করে। এটি এমন এক সহকারী, যে সার্টিফিকেট দেখে, লেখা পড়ে, তারপর সেটি আসল কিনা বোঝার চেষ্টা করে।
+
+## What This Project Does / এই প্রোজেক্ট কী করে
+
+- Takes a picture or file of a certificate.
+  সার্টিফিকেটের ছবি বা ফাইল নেয়।
+- Reads the words using OCR (a tool that reads text from images).
+  OCR দিয়ে লেখা পড়ে (ছবি থেকে লেখা পড়ার টুল)।
+- Searches the web to find matching information.
+  মিল পাওয়া তথ্য খুঁজতে ওয়েবে সার্চ করে।
+- Gives a result to help you decide if the certificate looks real.
+  সার্টিফিকেটটি আসল মনে হয় কিনা বুঝতে ফলাফল দেয়।
+
+## The Main Parts (Like Building Blocks) / প্রধান অংশগুলো (বিল্ডিং ব্লকের মতো)
+
+- [app.py](app.py) - The main door. You start here.
+  প্রধান দরজা। এখান থেকে শুরু।
+- [ocr_handler.py](ocr_handler.py) - The reader. It reads text from pictures.
+  পাঠক। ছবির লেখা পড়ে।
+- [search_agent.py](search_agent.py) - The explorer. It searches the web.
+  অনুসন্ধানকারী। ওয়েবে সার্চ করে।
+- [certificate_investigator.py](certificate_investigator.py) - The judge. It compares and decides.
+  বিচারক। তুলনা করে সিদ্ধান্ত দেয়।
+- [database.py](database.py) - The notebook. It stores results.
+  নোটবুক। ফলাফল সংরক্ষণ করে।
+- [utils.py](utils.py) - The toolbox. Small helper tools.
+  টুলবক্স। ছোট সহায়ক টুল।
+
+## Models Used / ব্যবহৃত মডেল
+
+- OCR model: `easyocr` (English) reads text from the certificate image.
+  OCR মডেল: `easyocr` (English) সার্টিফিকেটের ছবি থেকে লেখা পড়ে।
+- AI model for extracting fields: Google Gemini (default `models/gemini-flash-latest`).
+  তথ্য বের করার AI মডেল: Google Gemini (ডিফল্ট `models/gemini-flash-latest`)।
+- AI model for investigation: Google Gemini (`gemini-2.0-flash`).
+  তদন্তের AI মডেল: Google Gemini (`gemini-2.0-flash`)।
+- AI model for grounded search: Google Gemini (`gemini-2.5-flash`) with Google Search grounding.
+  গ্রাউন্ডেড সার্চের AI মডেল: Google Gemini (`gemini-2.5-flash`) + Google Search grounding।
+
+Notes:
+
+- If Gemini is not available, the app falls back to rule-based (heuristic) extraction.
+  যদি Gemini না থাকে, অ্যাপ নিয়ম-ভিত্তিক (heuristic) পদ্ধতিতে তথ্য বের করে।
+
+## Easy Step-by-Step Flow / সহজ ধাপে ধাপে প্রবাহ
+
+1. You give a certificate file.
+   আপনি একটি সার্টিফিকেট ফাইল দেন।
+2. The OCR reads the text.
+   OCR লেখা পড়ে।
+3. The search tool looks for matching info online.
+   সার্চ টুল অনলাইনে মিল খোঁজে।
+4. The investigator compares the text and search results.
+   ইনভেস্টিগেটর লেখা ও ফলাফল তুলনা করে।
+5. The app shows a result.
+   অ্যাপ ফলাফল দেখায়।
+
+## Algorithm (Kid-Friendly) / অ্যালগরিদম (বাচ্চাদের মতো সহজ)
+
+Think of it like a detective story:
+একটি গোয়েন্দা গল্পের মতো ভাবুন:
+
+1. **Look at the paper**: The app looks at the certificate picture.
+   **কাগজটা দেখে**: অ্যাপ সার্টিফিকেটের ছবি দেখে।
+2. **Read the words**: OCR reads all the words from the image.
+   **লেখা পড়ে**: OCR ছবি থেকে সব লেখা পড়ে।
+3. **Find the important bits**: AI (Gemini) or rules pick out the event name, organizer, and date.
+   **গুরুত্বপূর্ণ অংশ বের করে**: AI (Gemini) বা নিয়ম দিয়ে ইভেন্ট, আয়োজনকারী, আর তারিখ বের করে।
+4. **Ask the internet**: The search tool looks online for matching pages.
+   **ইন্টারনেটকে জিজ্ঞেস করে**: সার্চ টুল অনলাইনে মিল খোঁজে।
+5. **Compare and decide**: AI compares the certificate with what it found online and gives a score.
+   **তুলনা করে সিদ্ধান্ত**: AI সার্টিফিকেটের লেখা আর অনলাইনের তথ্য মিলিয়ে স্কোর দেয়।
+6. **Show the answer**: The app shows “Verified”, “Suspicious”, or “Fake”.
+   **উত্তর দেখায়**: অ্যাপ “Verified”, “Suspicious”, বা “Fake” দেখায়।
+
+## Picture Flow (Flow Chart) / ছবি দিয়ে প্রবাহ (ফ্লো চার্ট)
+
+```mermaid
+flowchart TD
+    A[Start: User gives certificate] --> B[OCR reads text]
+    B --> C[Search the web]
+    C --> D[Compare and investigate]
+    D --> E[Show result]
+```
+
+## Another Simple Diagram (Who Talks to Who) / আরেকটি সহজ চিত্র (কে কার সাথে কথা বলে)
+
+```mermaid
+graph LR
+    APP[app.py] --> OCR[ocr_handler.py]
+    APP --> SEARCH[search_agent.py]
+    APP --> INVESTIGATOR[certificate_investigator.py]
+    INVESTIGATOR --> DB[database.py]
+    APP --> UTILS[utils.py]
+```
+
+## How To Run (Simple) / কীভাবে চালাবেন (সহজ)
+
+1. Install the needed tools:
+   দরকারি টুল ইনস্টল করুন:
+
+```bash
+pip install -r requirements.txt
+```
+
+2. Run the app:
+   অ্যাপ চালান:
+
+```bash
+python app.py
+```
+
+## Helpful Tips / সহায়ক টিপস
+
+- If OCR reads a word wrong, results can be wrong too.
+  OCR ভুল পড়লে ফলাফলও ভুল হতে পারে।
+- The web search needs internet access.
+  ওয়েব সার্চের জন্য ইন্টারনেট লাগে।
+- Try a clear, high-quality image.
+  পরিষ্কার ও ভালো মানের ছবি দিন।
+
+## Example (Like a Story) / উদাহরণ (একটি গল্পের মতো)
+
+You take a photo of a certificate. The app reads the words, searches the web, and tells you if the words match what it finds. That helps you decide if the certificate looks real.
+আপনি সার্টিফিকেটের ছবি তুললেন। অ্যাপ লেখা পড়ল, ওয়েবে সার্চ করল, আর বলে দিল লেখা মিলে কিনা। এতে বোঝা সহজ হয় সার্টিফিকেটটি আসল মনে হয় কিনা।
