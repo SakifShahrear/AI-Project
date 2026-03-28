@@ -20,6 +20,14 @@ Complete AI-powered certificate verification system using OCR, Google Gemini AI,
 pip install -r requirements.txt
 ```
 
+If you want to use `pytesseract` fallback OCR, install Tesseract OCR engine in your OS and ensure it is available in PATH.
+
+For spaCy NER extraction, install an English model:
+
+```bash
+python -m spacy download en_core_web_sm
+```
+
 ### 2. Environment Variables
 
 Create a `.env` file in the project root:
@@ -34,6 +42,10 @@ GEMINI_API_KEY=your-gemini-api-key-here
 
 # Optional: SERP API
 SERP_API_KEY=your-serp-api-key-here
+
+# Optional: Organizer alias dataset (CSV)
+# Default path is ./datasets/organizer_aliases.csv
+ORGANIZER_ALIAS_DATASET=./datasets/organizer_aliases.csv
 ```
 
 ### 3. Supabase Setup
@@ -104,6 +116,24 @@ AI project/
 5. **AI Analysis** - Gemini evaluates probability
 6. **Save Results** - Store in Supabase database
 7. **View History** - Check past verifications
+
+## Organizer Alias Dataset (Recommended)
+
+To improve organizer extraction from noisy OCR text, maintain a CSV file:
+
+`datasets/organizer_aliases.csv`
+
+Required columns:
+
+- `alias`
+- `canonical_name`
+
+Example rows:
+
+- `BUET,Bangladesh University of Engineering and Technology`
+- `MIST,Military Institute of Science and Technology`
+
+You can add your own short forms and spelling variations. The app uses this mapping during organizer reconciliation.
 
 ## Scoring System
 

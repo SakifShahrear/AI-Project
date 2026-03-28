@@ -1,4 +1,5 @@
 import re
+import json
 from typing import Dict, List, Tuple
 from urllib.parse import urlparse
 
@@ -11,6 +12,21 @@ def _extract_year(text: str) -> int | None:
     # Look for 4-digit years (1900-2099)
     matches = re.findall(r'\b(19\d{2}|20\d{2})\b', str(text))
     return int(matches[0]) if matches else None
+
+
+def save_certificate_search_payload(
+    extracted: Dict,
+    search_results: List[str],
+    file_path: str = "certificate_info.json",
+) -> str:
+    """Save extracted certificate info and search results into JSON file."""
+    payload = {
+        "extracted": extracted,
+        "search_results": search_results,
+    }
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    return file_path
 
 
 def _check_certificate_legitimacy_patterns(raw_text: str) -> Tuple[float, List[str]]:
@@ -229,7 +245,10 @@ def rank_search_urls(
     search_urls: List[str],
     competition_name: str | None,
     organizer_name: str | None,
-    event_date: str | None
+    event_date: str | None,
+    logo_text: str | None = None,
+    logo_organizer: str | None = None,
+    organizer_acronym: str | None = None,
 ) -> List[str]:
     if not search_urls:
         return []
@@ -237,23 +256,153 @@ def rank_search_urls(
     tokens = set(_normalize_tokens(competition_name) + _normalize_tokens(organizer_name))
     year = _extract_year(event_date or "")
 
-    def relevance_score(url: str) -> int:
+    stopwords = {
+        "bangladesh", "event", "events", "official", "page", "home", "index", "www"
+    }
+    tokens = {t for t in tokens if t not in stopwords}
+
+    # Augment tokens from logo data for better keyword matching when OCR fields are unknown
+    if logo_organizer and logo_organizer not in ("Unknown", ""):
+        for t in _normalize_tokens(logo_organizer):
+            if t not in stopwords:
+                tokens.add(t)
+    if logo_text:
+        for t in _normalize_tokens(logo_text):
+            if t not in stopwords and len(t) > 4:
+                tokens.add(t)
+
+    acronym_token = (organizer_acronym or "").strip().lower()
+    if acronym_token:
+        tokens.add(acronym_token)
+
+    identity_tokens = set(tokens)
+
+    def _canonical_url_key(url: str) -> str:
+        try:
+            parsed = urlparse(url)
+            netloc = parsed.netloc.lower().replace("www.", "")
+            path = re.sub(r'/+', '/', parsed.path.rstrip('/').lower())
+            return f"{netloc}{path}"
+        except Exception:
+            return url.lower().strip()
+
+    def _domain_trust_score(url: str) -> int:
+        try:
+            netloc = urlparse(url).netloc.lower().replace("www.", "")
+        except Exception:
+            return 0
+
         score = 0
-        if _is_official_domain(url):
+        # Highest trust: Bangladesh official/academic domains
+        if netloc.endswith((".gov.bd", ".edu.bd", ".ac.bd")):
+            score += 20
+        elif netloc.endswith((".org.bd", ".com.bd", ".net.bd")):
+            score += 12
+        elif netloc.endswith(".bd"):
+            score += 9
+        # International trusted domains
+        elif netloc.endswith((".gov", ".edu")):
+            score += 14
+        elif netloc.endswith(".org"):
+            score += 8
+        elif netloc.endswith((".com", ".net", ".info")):
             score += 3
-        if _is_social_media_link(url):
-            score += 2
 
-        url_lower = url.lower()
-        if year and str(year) in url_lower:
-            score += 2
-
-        for token in tokens:
-            if token in url_lower:
-                score += 1
+        # Penalize social media (unless it's an event page — handled separately)
+        if any(s in netloc for s in ["facebook.com", "linkedin.com", "twitter.com", "instagram.com", "youtube.com"]):
+            score -= 6
         return score
 
-    return sorted(search_urls, key=relevance_score, reverse=True)
+    def _specificity_score(url: str) -> int:
+        try:
+            parsed = urlparse(url)
+            path = parsed.path.lower()
+            segments = [s for s in path.split('/') if s]
+        except Exception:
+            return 0
+
+        score = 0
+        if len(segments) >= 1:
+            score += 2
+        if len(segments) >= 2:
+            score += 2
+
+        path_hints = ["event", "competition", "contest", "summit", "hackathon", "news", "notice", "announcement"]
+        if any(h in path for h in path_hints):
+            score += 4
+
+        # Penalize generic home/category pages
+        generic_paths = {"", "/", "/home", "/index", "/about", "/contact"}
+        if path in generic_paths:
+            score -= 3
+
+        return score
+
+    def _keyword_match_score(url: str) -> int:
+        url_lower = url.lower()
+        score = 0
+        matched_any = False
+        for token in tokens:
+            if token in url_lower:
+                score += 2
+                matched_any = True
+
+        # Strong boost when acronym appears in domain/path (e.g., mist.ac.bd)
+        if acronym_token and acronym_token in url_lower:
+            score += 12
+            matched_any = True
+
+        # Penalize domains that have zero identity signal match
+        if tokens and not matched_any:
+            score -= 6
+
+        if year and str(year) in url_lower:
+            score += 3
+        return score
+
+    def relevance_score(url: str) -> int:
+        score = 0
+        score += _domain_trust_score(url)
+        score += _specificity_score(url)
+        score += _keyword_match_score(url)
+
+        if _is_official_domain(url):
+            score += 3
+        if _is_social_media_event(url):
+            score += 2
+        elif _is_social_media_link(url):
+            score -= 1
+        return score
+
+    # Deduplicate by canonical domain+path before sorting
+    dedup_map: Dict[str, str] = {}
+    for url in search_urls:
+        key = _canonical_url_key(url)
+        if key not in dedup_map:
+            dedup_map[key] = url
+
+    candidates = list(dedup_map.values())
+
+    # Hard filter unrelated URLs when we have organizer identity signals.
+    if identity_tokens:
+        strict_candidates = []
+        for url in candidates:
+            url_lower = url.lower()
+            if any(token in url_lower for token in identity_tokens):
+                strict_candidates.append(url)
+                continue
+            try:
+                netloc = urlparse(url).netloc.lower().replace("www.", "")
+            except Exception:
+                netloc = ""
+            if netloc.endswith((".ac.bd", ".edu.bd", ".gov.bd", ".org.bd")) and _extract_year(url) == year:
+                strict_candidates.append(url)
+
+        if strict_candidates:
+            candidates = strict_candidates
+
+    ranked = sorted(candidates, key=relevance_score, reverse=True)
+    return ranked
 
 
 def calculate_rule_based_score(

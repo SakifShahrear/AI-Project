@@ -15,8 +15,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Initialize Gemini API
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+_gemini_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+if _gemini_api_key:
+    genai.configure(api_key=_gemini_api_key)
 model = genai.GenerativeModel("gemini-2.0-flash")
+
+
+def _is_leaked_or_blocked_api_key_error(message: str) -> bool:
+    lowered = (message or "").lower()
+    return (
+        "api key was reported as leaked" in lowered
+        or ("403" in lowered and "api key" in lowered)
+        or "invalid api key" in lowered
+        or "permission denied" in lowered
+    )
 
 
 def format_web_data(web_info: List[Dict]) -> str:
@@ -127,11 +139,18 @@ In Bangladesh, many legitimate events are organized by private organizations, te
         
     except Exception as e:
         # Return error response in correct format
-        print(f"Error during investigation: {str(e)}")
+        error_text = str(e)
+        print(f"Error during investigation: {error_text}")
+
+        if _is_leaked_or_blocked_api_key_error(error_text):
+            reasoning = "Gemini API key is blocked/leaked. Expert investigator is unavailable; using rule-based and search evidence instead."
+        else:
+            reasoning = "Investigator AI is temporarily unavailable; using available rule-based and search evidence."
+
         return {
             "status": "Suspicious",
             "accuracy_score": 0,
-            "reasoning": f"Investigation error: {str(e)}",
+            "reasoning": reasoning,
             "evidence_found": "None",
             "candidate_verified": False,
             "organizer_verified": False,

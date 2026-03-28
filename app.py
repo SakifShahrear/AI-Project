@@ -14,7 +14,10 @@ load_dotenv()
 from ocr_handler import (
     extract_certificate_data, 
     ai_extract_structured_info,
-    ai_verify_validity
+    ai_verify_validity,
+    extract_entities_spacy,
+    extract_logo_organizer_name,
+    reconcile_organizer_name,
 )
 from search_agent import search_competition, scrape_search_results
 from database import (
@@ -96,17 +99,24 @@ if uploaded_file is not None:
             with st.expander("📄 View Raw OCR Text"):
                 st.text(raw_text[:500] + "..." if len(raw_text) > 500 else raw_text)
             
-            # --- Step 2: Extract structured info using AI ---
-            st.info("🤖 Step 2: Extracting structured data with AI...")
+            # --- Step 2: Extract structured info + logo organizer matching ---
+            st.info("🤖 Step 2: Extracting structured data (AI + Logo Matching)...")
             try:
                 extracted_info = ai_extract_structured_info(raw_text)
             except Exception as e:
                 st.warning("⚠️ AI quota reached. Falling back to heuristic extraction.")
                 from ocr_handler import extract_certificate_fields_heuristic
                 extracted_info = extract_certificate_fields_heuristic(raw_text)
+
+            logo_extraction = extract_logo_organizer_name(temp_file_path)
+            organizer_resolution = reconcile_organizer_name(
+                extracted_info.get('organizer_name'),
+                logo_extraction.get('organizer_name'),
+                logo_acronym=logo_extraction.get('organizer_acronym'),
+            )
             
             competition_name = extracted_info.get('competition_name') or "Unknown"
-            organizer_name = extracted_info.get('organizer_name') or "Unknown"
+            organizer_name = organizer_resolution.get('organizer_name') or extracted_info.get('organizer_name') or "Unknown"
             event_date = extracted_info.get('event_date') or "Unknown"
             
             st.success("✅ Structured data extracted successfully")
@@ -126,6 +136,14 @@ if uploaded_file is not None:
             # Debug expander to see raw AI response
             with st.expander("🔧 Debug: View AI Extraction Details"):
                 st.json(extracted_info)
+                st.markdown("**Logo-based Organizer Extraction**")
+                st.write(f"- Organizer from logo: `{logo_extraction.get('organizer_name') or 'Unknown'}`")
+                st.write(f"- Logo extraction source: `{logo_extraction.get('source', 'unknown')}`")
+                st.write(f"- Logo model confidence: `{logo_extraction.get('confidence', 0.0)}`")
+                st.write(f"- Logo model reasoning: `{logo_extraction.get('reasoning', 'N/A')}`")
+                st.write(f"- Reconciliation source: `{organizer_resolution.get('source', 'none')}`")
+                st.write(f"- OCR/Logo match score: `{organizer_resolution.get('match_score', 0.0)}`")
+                st.write(f"- Matched: `{organizer_resolution.get('matched', False)}`")
                 if competition_name == "Unknown" or organizer_name == "Unknown":
                     st.warning("⚠️ AI couldn't extract some fields. This might affect search accuracy.")
             
@@ -138,54 +156,65 @@ if uploaded_file is not None:
             with st.expander("🔎 Search Query Details"):
                 st.write(f"**Competition Name:** `{competition_name}`")
                 st.write(f"**Organizer Name:** `{organizer_name}`")
+                st.write(f"**Logo Organizer:** `{logo_extraction.get('organizer_name') or 'Unknown'}`")
+                st.write(f"**Logo Text Sample:** `{(logo_extraction.get('logo_text') or 'Unknown')[:120]}`")
                 st.write("**Search Strategy:** Will try multiple keyword variations and fallback queries")
             
             scraped_data = []  # Initialize scraped data
-            
-            if competition_name != "Unknown" and organizer_name != "Unknown":
-                with st.spinner(f'Searching Google for "{competition_name} {organizer_name}"...'):
-                    search_results = search_competition(competition_name, organizer_name)
-                
-                if len(search_results) > 0:
-                    st.success(f"✅ Found {len(search_results)} search results")
+            search_label = (
+                f'Searching Google for "{competition_name} {organizer_name}"...'
+                if competition_name != "Unknown" and organizer_name != "Unknown"
+                else 'Searching online using extracted logo identity and fallback queries...'
+            )
 
-                    search_results = rank_search_urls(
-                        search_results,
-                        competition_name,
-                        organizer_name,
-                        event_date
-                    )
-                    
-                    # NEW: Scrape web content from search results
-                    with st.spinner(f'🌐 Scraping content from {min(len(search_results), 5)} websites...'):
-                        scraped_data = scrape_search_results(search_results, max_urls=5)
-                    
-                    if scraped_data:
-                        st.success(f"✅ Successfully scraped {len(scraped_data)} websites")
-                    else:
-                        st.warning("⚠️ Could not scrape content from websites")
+            with st.spinner(search_label):
+                search_results = search_competition(
+                    competition_name,
+                    organizer_name,
+                    logo_text=logo_extraction.get('logo_text'),
+                    logo_organizer=logo_extraction.get('organizer_name'),
+                    organizer_acronym=organizer_resolution.get('organizer_acronym') or logo_extraction.get('organizer_acronym'),
+                )
+
+            if len(search_results) > 0:
+                if competition_name != "Unknown" and organizer_name != "Unknown":
+                    st.success(f"✅ Found {len(search_results)} search results")
                 else:
-                    st.warning("⚠️ No search results found.")
-                
-                with st.expander("🌐 View Search Results"):
-                    if search_results:
-                        for i, url in enumerate(search_results, 1):
-                            st.write(f"{i}. [{url}]({url})")
-                    else:
-                        st.info("**Why no results?**")
-                        st.write("• Google search may be rate limited (try again in a few minutes)")
-                        st.write("• Competition might be very new or local")
-                        st.write("• Organizer name might be incomplete/incorrect")
-                        st.write("• This doesn't mean the certificate is fake - AI analysis will still verify text quality")
-                        st.info("No results found. Possible reasons:")
-                        st.write("• Competition name not found online")
-                        st.write("• Organizer name is incorrect or too generic")
-                        st.write("• Google search rate limit reached")
-                        st.write("• Certificate might be fake")
+                    st.success(f"✅ Found {len(search_results)} search results using fallback/logo search")
+
+                search_results = rank_search_urls(
+                    search_results,
+                    competition_name,
+                    organizer_name,
+                    event_date,
+                    logo_text=logo_extraction.get('logo_text'),
+                    logo_organizer=logo_extraction.get('organizer_name'),
+                     organizer_acronym=organizer_resolution.get('organizer_acronym') or logo_extraction.get('organizer_acronym'),
+                )
+
+                with st.spinner(f'🌐 Scraping content from {min(len(search_results), 5)} websites...'):
+                    scraped_data = scrape_search_results(search_results, max_urls=5)
+
+                if scraped_data:
+                    st.success(f"✅ Successfully scraped {len(scraped_data)} websites")
+                else:
+                    st.warning("⚠️ Could not scrape content from websites")
             else:
-                st.warning("⚠️ Insufficient information extracted for online search")
-                st.write(f"Competition: `{competition_name}` | Organizer: `{organizer_name}`")
-                search_results = []
+                st.warning("⚠️ No search results found.")
+                if competition_name == "Unknown" or organizer_name == "Unknown":
+                    st.write(f"Competition: `{competition_name}` | Organizer: `{organizer_name}`")
+
+            with st.expander("🌐 View Search Results"):
+                if search_results:
+                    for i, url in enumerate(search_results, 1):
+                        st.write(f"{i}. [{url}]({url})")
+                else:
+                    st.info("**Why no results?**")
+                    st.write("• Google search may be rate limited (try again in a few minutes)")
+                    st.write("• Competition might be very new or local")
+                    st.write("• Organizer name might be incomplete/incorrect")
+                    st.write("• Logo text may be noisy or incomplete")
+                    st.write("• This doesn't mean the certificate is fake - rule-based analysis will still run")
             
             st.markdown("---")
             
@@ -329,14 +358,18 @@ if uploaded_file is not None:
                 ai_accuracy_score = ai_verdict.get('accuracy_score', 0)
                 reasoning = ai_verdict.get('reasoning', 'Unable to verify')
                 match_found = ai_verdict.get('match_found', False)
+                ai_available = ai_verdict.get('ai_available', True)
                 
                 # Legacy compatibility
                 ai_probability = ai_verdict.get('probability', ai_accuracy_score / 100)
                 ai_reasons = ai_verdict.get('reasons', [reasoning])
                 is_authentic = ai_verdict.get('is_authentic', status == 'Verified')
                 accuracy_score = score
-                
-                st.success("✅ AI verification complete")
+
+                if ai_available:
+                    st.success("✅ AI verification complete")
+                else:
+                    st.warning("⚠️ AI verification unavailable (API key issue). Using rule-based verification.")
             except Exception as e:
                 st.warning(f"⚠️ AI verification unavailable: {str(e)}")
                 status = 'Suspicious'
@@ -353,17 +386,19 @@ if uploaded_file is not None:
             st.info("🔍 Step 6: Running Expert Investigator Verification...")
             st.write("AI investigator is analyzing the certificate with forensic detail...")
             
-            # Extract candidate name from OCR text (if possible)
-            candidate_name = "Not extracted"
-            # Try to find a name pattern in the text
-            name_patterns = re.findall(r'\b[A-Z][a-z]+\s+[A-Z][a-z]+\b', raw_text)
-            if name_patterns:
-                candidate_name = name_patterns[0]
-            
-            # Extract location if available
-            location = "Bangladesh"
-            if 'dhaka' in raw_text.lower():
-                location = "Dhaka, Bangladesh"
+            # Extract candidate and location from optional spaCy NER pipeline
+            entity_info = extract_entities_spacy(raw_text)
+            candidate_name = entity_info.get("participant_name") or "Not extracted"
+            location = entity_info.get("location") or "Bangladesh"
+
+            with st.expander("🧩 Entity Extraction (spaCy/Regex)"):
+                st.write(f"- NER available: `{entity_info.get('ner_available', False)}`")
+                st.write(f"- Candidate: `{candidate_name}`")
+                st.write(f"- Location: `{location}`")
+                if entity_info.get("people"):
+                    st.write(f"- People candidates: `{entity_info.get('people')[:5]}`")
+                if entity_info.get("locations"):
+                    st.write(f"- Location candidates: `{entity_info.get('locations')[:5]}`")
             
             try:
                 # Run the investigator
@@ -444,9 +479,9 @@ if uploaded_file is not None:
                 st.error("❌ **No Match:** Could not verify event details online")
             
             # AI Reasoning
-            st.markdown("### 🧠 AI Forensic Analysis Report")
-            
-            # Create a nice visual card for the verdict
+            st.markdown("### 🧠 Analysis Details")
+
+            # Create a visual card for the verdict
             if status == "Verified" or is_authentic:
                 st.success("✅ **AI Verdict: VERIFIED/AUTHENTIC**")
                 st.write("Certificate text appears legitimate and matches online data")
@@ -509,122 +544,8 @@ if uploaded_file is not None:
             if ai_reasons:
                 for i, reason in enumerate(ai_reasons, 1):
                     st.write(f"{i}. {reason}")
-            
+
             st.markdown("---")
-            
-            # --- NEW: Expert Investigator Analysis Report ---
-            st.header("🔍 Expert Investigator Report")
-            st.markdown("*Advanced forensic analysis comparing OCR data with web evidence*")
-            
-            # Investigator Metrics
-            inv_col1, inv_col2, inv_col3 = st.columns(3)
-            
-            with inv_col1:
-                st.metric(
-                    "🎯 Investigation Score",
-                    f"{investigator_score}/100",
-                    help="Expert investigator's verification score"
-                )
-            
-            with inv_col2:
-                inv_status_emoji = {"Verified": "✅", "Suspicious": "⚠️", "Fake": "❌"}
-                st.metric(
-                    "📋 Investigation Status",
-                    f"{inv_status_emoji.get(investigator_status, '❓')} {investigator_status}"
-                )
-            
-            with inv_col3:
-                event_verified = investigation_result.get('event_found_online', False)
-                st.metric(
-                    "🌐 Event Found Online",
-                    "✅ Yes" if event_verified else "❌ No",
-                    help="Was the event found in web search results?"
-                )
-            
-            # Investigator Verdict Card
-            st.markdown("### 🧐 Investigator Verdict")
-            
-            if investigator_status == "Verified":
-                st.success("""
-✅ **CERTIFICATE VERIFIED**
-
-The expert investigator found strong evidence:
-- Event details match online sources
-- Organizer is legitimate and verified
-- All key information corroborated
-                """)
-            elif investigator_status == "Suspicious":
-                st.warning("""
-⚠️ **CERTIFICATE SUSPICIOUS**
-
-The investigator found limited evidence:
-- Some details could not be verified online
-- Event may be too new or local
-- Recommend manual verification
-                """)
-            else:  # Fake
-                st.error("""
-❌ **CERTIFICATE LIKELY FAKE**
-
-The investigator found serious issues:
-- Event not found in any online sources
-- Organizer cannot be verified
-- Information inconsistent with web data
-                """)
-            
-            # Investigation Details
-            st.markdown("### 📊 Investigation Details")
-            
-            inv_details_col1, inv_details_col2 = st.columns(2)
-            
-            with inv_details_col1:
-                st.markdown("**Verification Flags:**")
-                candidate_check = investigation_result.get('candidate_verified', False)
-                organizer_check = investigation_result.get('organizer_verified', False)
-                event_check = investigation_result.get('event_found_online', False)
-                
-                st.markdown(f"- Candidate Name Verified: {'✅ Yes' if candidate_check else '❌ No'}")
-                st.markdown(f"- Organizer Verified: {'✅ Yes' if organizer_check else '❌ No'}")
-                st.markdown(f"- Event Found Online: {'✅ Yes' if event_check else '❌ No'}")
-            
-            with inv_details_col2:
-                st.markdown("**Keywords Matched:**")
-                keywords = investigation_result.get('keywords_found', [])
-                if keywords:
-                    for kw in keywords[:5]:  # Show first 5 keywords
-                        st.markdown(f"- {kw}")
-                else:
-                    st.markdown("- No specific keywords matched")
-            
-            # Investigation Reasoning
-            st.markdown("### 📋 Investigator's Reasoning")
-            st.info(investigator_reasoning)
-            
-            # Evidence Found
-            st.markdown("### 🔗 Evidence Found")
-            if investigator_evidence and investigator_evidence != "None":
-                st.success(f"**Primary Evidence:** {investigator_evidence}")
-            else:
-                st.warning("No specific evidence URL could be identified")
-            
-            st.markdown("---")
-            
-            # --- Comparison: AI vs Investigator ---
-            st.header("📈 Analysis Comparison: AI vs Investigator")
-            
-            comparison_cols = st.columns(2)
-            
-            with comparison_cols[0]:
-                st.markdown("### 🤖 AI Analysis")
-                st.markdown(f"- **Score:** {accuracy_score}/100")
-                st.markdown(f"- **Status:** {status}")
-                st.markdown(f"- **Type:** General forensic analysis")
-            
-            with comparison_cols[1]:
-                st.markdown("### 🔍 Expert Investigator")
-                st.markdown(f"- **Score:** {investigator_score}/100")
-                st.markdown(f"- **Status:** {investigator_status}")
-                st.markdown(f"- **Type:** Bangladesh-specific deep investigation")
             
             # Final Recommendation
             st.markdown("---")
